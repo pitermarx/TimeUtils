@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using Quartz;
 using Quartz.Impl;
 using Quartz.Impl.Matchers;
@@ -29,7 +30,7 @@ namespace pitermarx.TimeUtils
                     if (action != null)
                     {
                         // execute action
-                        action((T)context.JobDetail.JobDataMap["Data"]);
+                        action((T) context.JobDetail.JobDataMap["Data"]);
                     }
                 }
             }
@@ -53,7 +54,7 @@ namespace pitermarx.TimeUtils
             this.scheduler = DirectSchedulerFactory.Instance.GetScheduler(this.name);
             this.scheduler.Start();
 
-            Schedulers.Add(this.scheduler);
+            lock (Schedulers) Schedulers.Add(this.scheduler);
         }
 
         public DateTimeOffset? RepeatForever(TimeSpan interval, Action action)
@@ -71,7 +72,8 @@ namespace pitermarx.TimeUtils
             return this.Schedule(sch, new object(), _ => a());
         }
 
-        public DateTimeOffset? Schedule<T>(Func<SimpleScheduleBuilder, SimpleScheduleBuilder> sch, T data, Action<T> action)
+        public DateTimeOffset? Schedule<T>(Func<SimpleScheduleBuilder, SimpleScheduleBuilder> sch, T data,
+            Action<T> action)
         {
             var itrigger = TriggerBuilder.Create()
                 .StartNow()
@@ -88,9 +90,8 @@ namespace pitermarx.TimeUtils
 
         public DateTimeOffset? ScheduleTrigger<T>(ITrigger trigger, T data, Action<T> action)
         {
-            var jobDataMap = new JobDataMap();
-            jobDataMap["Action"] = action;
-            jobDataMap["Data"] = data;
+            IDictionary<string, object> dataMap = new Dictionary<string, object> {{"Action", action}, {"Data", data}};
+            var jobDataMap = new JobDataMap(dataMap);
 
             var ijob = JobBuilder.Create<SimpleActionJob<T>>()
                 .WithIdentity(new JobKey(Guid.NewGuid().ToString()))
@@ -102,16 +103,32 @@ namespace pitermarx.TimeUtils
             return trigger.GetNextFireTimeUtc();
         }
 
+        public DateTimeOffset? RunAt<T>(DateTime time, T data, Action<T> action)
+        {
+            return this.ScheduleTrigger(
+                TriggerBuilder.Create()
+                    .StartAt(DateBuilder.DateOf(time.Hour, time.Minute, time.Second, time.Day, time.Month, time.Year))
+                    .WithSimpleSchedule(s => s.WithRepeatCount(0))
+                    .Build(),
+                data,
+                action);
+        }
+
         public void Unschedule(TriggerKey key)
         {
             this.scheduler.UnscheduleJob(key);
+        }
+
+        public void Unschedule(GroupMatcher<TriggerKey> matcher)
+        {
+            this.scheduler.UnscheduleJobs(this.scheduler.GetTriggerKeys(matcher).ToList());
         }
 
         /// <summary> Shutsdown the scheduler </summary>
         public void Shutdown(bool waitForJobs = false)
         {
             this.scheduler.Shutdown(waitForJobs);
-            Schedulers.Remove(this.scheduler);
+            lock (Schedulers) Schedulers.Remove(this.scheduler);
         }
 
         /// <summary> Unschedules all jobs </summary>
@@ -127,6 +144,35 @@ namespace pitermarx.TimeUtils
         public static void ShutdownAllQuartzInstances()
         {
             Schedulers.ForEach(s => s.Shutdown());
+        }
+
+        public Task<bool> Retryer<T>(TimeSpan retryInterval, int retryCount, T data, Func<T, bool> action,
+            Action<T> fallback = null)
+        {
+            // if the action return true, no retry is needed
+            if (action(data))
+            {
+                return Task.FromResult(true);
+            }
+
+            return Task.Run(() =>
+            {
+                int counter = 0;
+                bool success;
+                do
+                {
+                    counter += 1;
+                    Task.Delay(retryInterval);
+                    success = action(data);
+                } while (counter <= retryCount && !success);
+
+                if (!success && fallback != null)
+                {
+                    fallback(data);
+                }
+
+                return success;
+            });
         }
     }
 }

@@ -10,7 +10,7 @@ namespace pitermarx.TimeUtils
         private static TimeTrigger CreateTimeTrigger(EventWaitHandle wait, TimeSpan period)
         {
             var trigg = new TimeTrigger(period);
-            trigg.TimerElapsed += (s,d) => wait.Set();
+            trigg.TimerElapsed += (s, d) => wait.Set();
             return trigg;
         }
 
